@@ -1,318 +1,219 @@
-// Block keys capable of altering object prototypes
-const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const FORBIDDEN_KEYS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype"
+]);
 
-// Maximum array size allowed when creating empty arrays via paths
 const MAX_SAFE_ARRAY_INDEX = 100_000;
 
-/**
- * Checks whether a value can be traversed safely
- * like an object or array.
- */
 function isObjectLike(value) {
   return value !== null && typeof value === "object";
 }
 
-/**
- * Checks whether a string represents a non-negative integer.
- */
 function isArrayIndexKey(key) {
-  return typeof key === "string" && /^\d+$/.test(key);
+  return /^\d+$/.test(key);
 }
 
-/**
- * Normalizes a path string and checks for dangerous properties.
- *
- * Supported examples:
- *   "user.profile.name"
- *   "items[0].id"
- *   'items["0"].id'
- *   ["user", "profile", "name"]
- */
-function parsePath(path) {
-  let keys;
-
-  if (Array.isArray(path)) {
-    keys = path;
-  } else if (typeof path === "string") {
-    keys = path
-      .replace(/\[["']?([^"']+)["']?\]/g, ".$1")
-      .split(".")
-      .filter(Boolean);
-  } else {
-    return [];
-  }
-
-  for (const key of keys) {
-    if (typeof key !== "string") {
-      throw new TypeError("Path segments must be strings.");
-    }
-
-    if (FORBIDDEN_KEYS.has(key)) {
-      throw new Error(
-        `Security Exception: Accessing forbidden property "${key}" is disallowed.`,
-      );
-    }
-  }
-
-  return keys;
-}
-
-/**
- * Safely checks whether an object has its own property.
- */
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
-export class ObjectStore {
-  constructor(initialData = {}) {
-    if (!isObjectLike(initialData)) {
-      throw new TypeError("Initial data must be a non-null object or array.");
-    }
+export class ObjectStoreError extends Error {
+  constructor(message, path = null) {
+    super(message);
 
-    this.data = initialData;
+    this.name = "ObjectStoreError";
+    this.path = path;
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, ObjectStoreError);
+    }
+  }
+}
+
+function validateSegment(segment, path) {
+  if (segment === "") {
+    throw new ObjectStoreError(
+      `Invalid path "${path}". Path contains an empty segment.`,
+      path
+    );
   }
 
-  /**
-   * Safely sets a value at a deeply nested path.
-   *
-   * Examples:
-   *   store.set("user.profile.name", "John");
-   *   store.set("items[0].id", 100);
-   */
-  set(path, value) {
-    const keys = parsePath(path);
+  if (FORBIDDEN_KEYS.has(segment)) {
+    throw new ObjectStoreError(
+      `Forbidden property "${segment}".`,
+      path
+    );
+  }
+}
 
-    if (keys.length === 0) {
-      return this.data;
+function parsePath(path) {
+  // Array path
+  // Example: ["user", "profile", "name"]
+  if (Array.isArray(path)) {
+    if (path.length === 0) {
+      throw new ObjectStoreError(
+        "Invalid path. Path cannot be empty.",
+        path
+      );
     }
 
-    let current = this.data;
+    return path.map((segment) => {
+      const value = String(segment);
 
-    for (let i = 0; i < keys.length - 1; i++) {
-      const key = keys[i];
-      const nextKey = keys[i + 1];
+      validateSegment(value, path);
 
-      // Check array index limits before creating an array
-      if (isArrayIndexKey(nextKey)) {
-        const index = Number(nextKey);
+      return value;
+    });
+  }
+
+  if (typeof path !== "string") {
+    throw new ObjectStoreError(
+      "Invalid path. Path must be a string or an array.",
+      path
+    );
+  }
+
+  if (path.length === 0) {
+    throw new ObjectStoreError(
+      "Invalid path. Path cannot be empty.",
+      path
+    );
+  }
+
+  const parts = [];
+
+  let i = 0;
+  let expectingSegment = true;
+
+  while (i < path.length) {
+    // Dot separator
+    if (path[i] === ".") {
+      if (expectingSegment) {
+        throw new ObjectStoreError(
+          `Invalid path "${path}". Path contains an empty segment.`,
+          path
+        );
+      }
+
+      expectingSegment = true;
+      i++;
+      continue;
+    }
+
+    // Bracket notation
+    if (path[i] === "[") {
+      const closeIndex = path.indexOf("]", i);
+
+      if (closeIndex === -1) {
+        throw new ObjectStoreError(
+          `Invalid path "${path}". Missing closing bracket.`,
+          path
+        );
+      }
+
+      const content = path.slice(
+        i + 1,
+        closeIndex
+      );
+
+      if (content.length === 0) {
+        throw new ObjectStoreError(
+          `Invalid path "${path}". Empty bracket expression.`,
+          path
+        );
+      }
+
+      let segment = content;
+
+      // ["name"]
+      // ['name']
+      if (
+        (content.startsWith('"') &&
+          content.endsWith('"')) ||
+        (content.startsWith("'") &&
+          content.endsWith("'"))
+      ) {
+        segment = content.slice(1, -1);
+      }
+
+      // Only numeric indexes are allowed for unquoted brackets
+      if (
+        !content.startsWith('"') &&
+        !content.startsWith("'") &&
+        !/^\d+$/.test(content)
+      ) {
+        throw new ObjectStoreError(
+          `Invalid path "${path}". Invalid array index "${content}".`,
+          path
+        );
+      }
+
+      validateSegment(segment, path);
+
+      if (isArrayIndexKey(segment)) {
+        const index = Number(segment);
 
         if (index > MAX_SAFE_ARRAY_INDEX) {
-          throw new RangeError(
-            `Array index ${index} exceeds maximum safe initialization limit.`,
+          throw new ObjectStoreError(
+            `Array index "${segment}" exceeds the maximum allowed index.`,
+            path
           );
         }
       }
 
-      const shouldCreateArray = isArrayIndexKey(nextKey);
+      parts.push(segment);
 
-      // Replace missing or non-object values with a new container
-      if (!isObjectLike(current[key])) {
-        current[key] = shouldCreateArray ? [] : {};
-      }
+      i = closeIndex + 1;
+      expectingSegment = false;
 
-      current = current[key];
+      continue;
     }
 
-    const finalKey = keys[keys.length - 1];
+    // Normal property name
+    let start = i;
 
-    // Prevent creating an excessively large array through the final key
-    if (Array.isArray(current) && isArrayIndexKey(finalKey)) {
-      const index = Number(finalKey);
-
-      if (index > MAX_SAFE_ARRAY_INDEX) {
-        throw new RangeError(
-          `Array index ${index} exceeds maximum safe initialization limit.`,
-        );
-      }
+    while (
+      i < path.length &&
+      path[i] !== "." &&
+      path[i] !== "["
+    ) {
+      i++;
     }
 
-    current[finalKey] = value;
+    const segment = path.slice(start, i);
 
-    return this.data;
+    validateSegment(segment, path);
+
+    parts.push(segment);
+
+    expectingSegment = false;
   }
 
-  /**
-   * Safely retrieves a value or collection of values matching a path.
-   *
-   * Supports wildcard segments:
-   *   "users.*.name"
-   */
-  get(path) {
-    if (!path) {
-      return this.data;
-    }
-
-    let keys;
-
-    try {
-      keys = parsePath(path);
-    } catch {
-      return undefined;
-    }
-
-    const visited = new WeakSet();
-
-    return this._getRecursive(this.data, keys, 0, visited);
+  if (expectingSegment) {
+    throw new ObjectStoreError(
+      `Invalid path "${path}". Path contains an empty segment.`,
+      path
+    );
   }
 
-  _getRecursive(current, keys, index, visited) {
-    if (index === keys.length) {
-      return current;
+  return parts;
+}
+
+export class ObjectStore {
+  constructor(data = {}) {
+    if (!isObjectLike(data)) {
+      throw new ObjectStoreError(
+        "ObjectStore data must be an object or array."
+      );
     }
 
-    if (!isObjectLike(current)) {
-      return undefined;
-    }
-
-    // Prevent infinite recursion caused by circular references
-    if (visited.has(current)) {
-      return undefined;
-    }
-
-    visited.add(current);
-
-    const key = keys[index];
-
-    // Wildcard branch
-    if (key === "*") {
-      const values = Array.isArray(current) ? current : Object.values(current);
-
-      const results = [];
-
-      for (const item of values) {
-        const value = this._getRecursive(item, keys, index + 1, visited);
-
-        if (value !== undefined) {
-          if (Array.isArray(value) && keys.slice(index + 1).includes("*")) {
-            results.push(...value);
-          } else {
-            results.push(value);
-          }
-        }
-      }
-
-      return results;
-    }
-
-    // Only allow access to own properties
-    if (!hasOwn(current, key)) {
-      return undefined;
-    }
-
-    return this._getRecursive(current[key], keys, index + 1, visited);
+    this.data = data;
   }
 
-  /**
-   * Deletes a property or array element at a specified path.
-   *
-   * Array elements are removed using splice().
-   */
-  delete(path) {
-    const keys = parsePath(path);
-
-    if (keys.length === 0) {
-      return false;
-    }
-
-    let current = this.data;
-
-    for (let i = 0; i < keys.length - 1; i++) {
-      const key = keys[i];
-
-      if (!isObjectLike(current) || !hasOwn(current, key)) {
-        return false;
-      }
-
-      current = current[key];
-    }
-
-    if (!isObjectLike(current)) {
-      return false;
-    }
-
-    const finalKey = keys[keys.length - 1];
-
-    if (Array.isArray(current)) {
-      if (!isArrayIndexKey(finalKey)) {
-        return false;
-      }
-
-      const index = Number(finalKey);
-
-      if (index >= 0 && index < current.length) {
-        current.splice(index, 1);
-        return true;
-      }
-
-      return false;
-    }
-
-    if (hasOwn(current, finalKey)) {
-      delete current[finalKey];
-      return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Ensures that a path contains an array.
-   *
-   * If the path does not exist, an empty array is created.
-   */
-  _ensureArray(path) {
-    let target = this.get(path);
-
-    if (target === undefined) {
-      target = [];
-      this.set(path, target);
-    } else if (!Array.isArray(target)) {
-      throw new TypeError(`Target at path "${path}" is not an Array.`);
-    }
-
-    return target;
-  }
-
-  /**
-   * Adds one or more items to the end of an array.
-   */
-  push(path, ...items) {
-    const arr = this._ensureArray(path);
-    return arr.push(...items);
-  }
-
-  /**
-   * Removes and returns the last item.
-   */
-  pop(path) {
-    const arr = this._ensureArray(path);
-    return arr.pop();
-  }
-
-  /**
-   * Removes and returns the first item.
-   */
-  shift(path) {
-    const arr = this._ensureArray(path);
-    return arr.shift();
-  }
-
-  /**
-   * Adds one or more items to the beginning of an array.
-   */
-  unshift(path, ...items) {
-    const arr = this._ensureArray(path);
-    return arr.unshift(...items);
-  }
-
-  /**
-   * Removes, replaces, or adds items at a specified position.
-   */
-  splice(path, start, deleteCount, ...items) {
-    const arr = this._ensureArray(path);
-    return arr.splice(start, deleteCount, ...items);
-  }
+  // -----------------------------
+  // Utility methods
+  // -----------------------------
 
   static isNull(value) {
     return value === null || value === undefined;
@@ -338,11 +239,508 @@ export class ObjectStore {
     return false;
   }
 
-  static isNullOrWhiteSpace(value) {
-    return (
-      value === null ||
-      value === undefined ||
-      (typeof value === "string" && value.trim().length === 0)
+  // -----------------------------
+  // Set
+  // -----------------------------
+
+  set(path, value) {
+    const parts = parsePath(path);
+
+    let current = this.data;
+
+    for (let i = 0; i < parts.length - 1; i++) {
+      const key = parts[i];
+      const nextKey = parts[i + 1];
+
+      if (!isObjectLike(current)) {
+        throw new ObjectStoreError(
+          `Cannot set "${path}". Parent path is not an object or array.`,
+          path
+        );
+      }
+
+      if (
+        !hasOwn(current, key) ||
+        current[key] === null
+      ) {
+        current[key] = isArrayIndexKey(nextKey)
+          ? []
+          : {};
+      } else if (!isObjectLike(current[key])) {
+        throw new ObjectStoreError(
+          `Cannot set "${path}". "${parts
+            .slice(0, i + 1)
+            .join(".")}" is not an object or array.`,
+          path
+        );
+      }
+
+      current = current[key];
+    }
+
+    const finalKey = parts[parts.length - 1];
+
+    if (
+      Array.isArray(current) &&
+      isArrayIndexKey(finalKey)
+    ) {
+      const index = Number(finalKey);
+
+      if (index > MAX_SAFE_ARRAY_INDEX) {
+        throw new ObjectStoreError(
+          `Array index "${finalKey}" exceeds the maximum allowed index.`,
+          path
+        );
+      }
+    }
+
+    current[finalKey] = value;
+
+    return this;
+  }
+
+  // -----------------------------
+  // Get
+  // -----------------------------
+
+  get(path) {
+    const parts = parsePath(path);
+
+    return this._getRecursive(
+      this.data,
+      parts,
+      new Set()
     );
+  }
+
+  // -----------------------------
+  // Get strict
+  // -----------------------------
+
+  getStrict(path) {
+    const parts = parsePath(path);
+
+    return this._getStrictRecursive(
+      this.data,
+      parts,
+      new Set(),
+      path
+    );
+  }
+
+  // -----------------------------
+  // Recursive get
+  // -----------------------------
+
+  _getRecursive(current, parts, visited) {
+    if (parts.length === 0) {
+      return current;
+    }
+
+    if (!isObjectLike(current)) {
+      return undefined;
+    }
+
+    if (visited.has(current)) {
+      return undefined;
+    }
+
+    visited.add(current);
+
+    const [key, ...remaining] = parts;
+
+    // Wildcard
+    if (key === "*") {
+      const results = [];
+
+      if (Array.isArray(current)) {
+        for (const item of current) {
+          const value = this._getRecursive(
+            item,
+            remaining,
+            new Set(visited)
+          );
+
+          if (value !== undefined) {
+            results.push(value);
+          }
+        }
+      } else {
+        for (const property of Object.keys(current)) {
+          const value = this._getRecursive(
+            current[property],
+            remaining,
+            new Set(visited)
+          );
+
+          if (value !== undefined) {
+            results.push(value);
+          }
+        }
+      }
+
+      return results;
+    }
+
+    if (!hasOwn(current, key)) {
+      return undefined;
+    }
+
+    return this._getRecursive(
+      current[key],
+      remaining,
+      visited
+    );
+  }
+
+  // -----------------------------
+  // Recursive strict get
+  // -----------------------------
+
+  _getStrictRecursive(
+    current,
+    parts,
+    visited,
+    originalPath
+  ) {
+    if (parts.length === 0) {
+      return current;
+    }
+
+    if (!isObjectLike(current)) {
+      throw new ObjectStoreError(
+        `Path "${originalPath}" does not exist.`,
+        originalPath
+      );
+    }
+
+    if (visited.has(current)) {
+      throw new ObjectStoreError(
+        `Cannot resolve path "${originalPath}" because a circular reference was detected.`,
+        originalPath
+      );
+    }
+
+    visited.add(current);
+
+    const [key, ...remaining] = parts;
+
+    // Wildcard
+    if (key === "*") {
+      const results = [];
+
+      if (Array.isArray(current)) {
+        for (const item of current) {
+          try {
+            const value = this._getStrictRecursive(
+              item,
+              remaining,
+              new Set(visited),
+              originalPath
+            );
+
+            results.push(value);
+          } catch (error) {
+            if (!(error instanceof ObjectStoreError)) {
+              throw error;
+            }
+          }
+        }
+      } else {
+        for (const property of Object.keys(current)) {
+          try {
+            const value = this._getStrictRecursive(
+              current[property],
+              remaining,
+              new Set(visited),
+              originalPath
+            );
+
+            results.push(value);
+          } catch (error) {
+            if (!(error instanceof ObjectStoreError)) {
+              throw error;
+            }
+          }
+        }
+      }
+
+      return results;
+    }
+
+    if (!hasOwn(current, key)) {
+      throw new ObjectStoreError(
+        `Path "${originalPath}" does not exist.`,
+        originalPath
+      );
+    }
+
+    return this._getStrictRecursive(
+      current[key],
+      remaining,
+      visited,
+      originalPath
+    );
+  }
+
+  // -----------------------------
+  // Replace
+  // -----------------------------
+
+  replace(path, value) {
+    const parts = parsePath(path);
+
+    if (parts.length === 0) {
+      return false;
+    }
+
+    const key = parts[parts.length - 1];
+    const parentParts = parts.slice(0, -1);
+
+    let parent = this.data;
+
+    if (parentParts.length > 0) {
+      parent = this._getRecursive(
+        this.data,
+        parentParts,
+        new Set()
+      );
+    }
+
+    if (
+      parent === undefined ||
+      parent === null ||
+      !isObjectLike(parent)
+    ) {
+      return false;
+    }
+
+    if (!hasOwn(parent, key)) {
+      return false;
+    }
+
+    parent[key] = value;
+
+    return true;
+  }
+
+  // -----------------------------
+  // Delete
+  // -----------------------------
+
+  delete(path) {
+    const parts = parsePath(path);
+
+    if (parts.length === 0) {
+      return false;
+    }
+
+    const key = parts[parts.length - 1];
+    const parentParts = parts.slice(0, -1);
+
+    let parent = this.data;
+
+    if (parentParts.length > 0) {
+      parent = this._getRecursive(
+        this.data,
+        parentParts,
+        new Set()
+      );
+    }
+
+    if (
+      parent === undefined ||
+      parent === null ||
+      !isObjectLike(parent)
+    ) {
+      return false;
+    }
+
+    if (!hasOwn(parent, key)) {
+      return false;
+    }
+
+    if (
+      Array.isArray(parent) &&
+      isArrayIndexKey(key)
+    ) {
+      parent.splice(Number(key), 1);
+    } else {
+      delete parent[key];
+    }
+
+    return true;
+  }
+
+  // -----------------------------
+  // Has
+  // -----------------------------
+
+  has(path) {
+    const parts = parsePath(path);
+
+    let current = this.data;
+
+    for (const key of parts) {
+      if (!isObjectLike(current)) {
+        return false;
+      }
+
+      if (!hasOwn(current, key)) {
+        return false;
+      }
+
+      current = current[key];
+    }
+
+    return true;
+  }
+
+  // -----------------------------
+  // Is empty
+  // -----------------------------
+
+  isEmpty(path) {
+    const value = this.get(path);
+
+    return ObjectStore.isNullOrEmpty(value);
+  }
+
+  // -----------------------------
+  // Keys
+  // -----------------------------
+
+  keys(path = null) {
+    const value =
+      path === null
+        ? this.data
+        : this.get(path);
+
+    if (!isObjectLike(value)) {
+      return [];
+    }
+
+    return Object.keys(value);
+  }
+
+  // -----------------------------
+  // Values
+  // -----------------------------
+
+  values(path = null) {
+    const value =
+      path === null
+        ? this.data
+        : this.get(path);
+
+    if (!isObjectLike(value)) {
+      return [];
+    }
+
+    return Object.values(value);
+  }
+
+  // -----------------------------
+  // Clear
+  // -----------------------------
+
+  clear(path = null) {
+    if (path === null) {
+      if (Array.isArray(this.data)) {
+        this.data.length = 0;
+      } else {
+        for (const key of Object.keys(this.data)) {
+          delete this.data[key];
+        }
+      }
+
+      return true;
+    }
+
+    const value = this.get(path);
+
+    if (!isObjectLike(value)) {
+      return false;
+    }
+
+    if (Array.isArray(value)) {
+      value.length = 0;
+    } else {
+      for (const key of Object.keys(value)) {
+        delete value[key];
+      }
+    }
+
+    return true;
+  }
+
+  // -----------------------------
+  // Clone
+  // -----------------------------
+
+  clone() {
+    return structuredClone(this.data);
+  }
+
+  // -----------------------------
+  // Array helpers
+  // -----------------------------
+
+  push(path, ...values) {
+    const array = this._ensureArray(path);
+
+    array.push(...values);
+
+    return array.length;
+  }
+
+  pop(path) {
+    const array = this._ensureArray(path);
+
+    return array.pop();
+  }
+
+  shift(path) {
+    const array = this._ensureArray(path);
+
+    return array.shift();
+  }
+
+  unshift(path, ...values) {
+    const array = this._ensureArray(path);
+
+    return array.unshift(...values);
+  }
+
+  splice(
+    path,
+    start,
+    deleteCount,
+    ...items
+  ) {
+    const array = this._ensureArray(path);
+
+    return array.splice(
+      start,
+      deleteCount,
+      ...items
+    );
+  }
+
+  // -----------------------------
+  // Internal array validation
+  // -----------------------------
+
+  _ensureArray(path) {
+    const value = this.get(path);
+
+    if (!Array.isArray(value)) {
+      throw new ObjectStoreError(
+        `Path "${path}" is not an array.`,
+        path
+      );
+    }
+
+    return value;
   }
 }
