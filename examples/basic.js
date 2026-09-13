@@ -30,3 +30,14 @@ console.log("Item names:", store.get("items.*.name"));
 store.delete("user.profile.age");
 
 console.log("After delete:", store.get("user.profile"));
+
+// 7. Check for null or undefined
+console.log("Is null:", ObjectStore.isNull(null));
+console.log("Is undefined:", ObjectStore.isNull(undefined));
+console.log("Is value null:", ObjectStore.isNull("hello"));
+
+// 8. Check for null or empty
+console.log("Empty string:", ObjectStore.isNullOrEmpty(""));
+console.log("Empty array:", ObjectStore.isNullOrEmpty([]));
+console.log("Empty object:", ObjectStore.isNullOrEmpty({}));
+console.log("Has value:", ObjectStore.isNullOrEmpty("hello"));

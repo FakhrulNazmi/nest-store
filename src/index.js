@@ -1,9 +1,5 @@
 // Block keys capable of altering object prototypes
-const FORBIDDEN_KEYS = new Set([
-  "__proto__",
-  "constructor",
-  "prototype"
-]);
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 // Maximum array size allowed when creating empty arrays via paths
 const MAX_SAFE_ARRAY_INDEX = 100_000;
@@ -53,7 +49,7 @@ function parsePath(path) {
 
     if (FORBIDDEN_KEYS.has(key)) {
       throw new Error(
-        `Security Exception: Accessing forbidden property "${key}" is disallowed.`
+        `Security Exception: Accessing forbidden property "${key}" is disallowed.`,
       );
     }
   }
@@ -71,9 +67,7 @@ function hasOwn(object, key) {
 export class ObjectStore {
   constructor(initialData = {}) {
     if (!isObjectLike(initialData)) {
-      throw new TypeError(
-        "Initial data must be a non-null object or array."
-      );
+      throw new TypeError("Initial data must be a non-null object or array.");
     }
 
     this.data = initialData;
@@ -105,7 +99,7 @@ export class ObjectStore {
 
         if (index > MAX_SAFE_ARRAY_INDEX) {
           throw new RangeError(
-            `Array index ${index} exceeds maximum safe initialization limit.`
+            `Array index ${index} exceeds maximum safe initialization limit.`,
           );
         }
       }
@@ -128,7 +122,7 @@ export class ObjectStore {
 
       if (index > MAX_SAFE_ARRAY_INDEX) {
         throw new RangeError(
-          `Array index ${index} exceeds maximum safe initialization limit.`
+          `Array index ${index} exceeds maximum safe initialization limit.`,
         );
       }
     }
@@ -182,25 +176,15 @@ export class ObjectStore {
 
     // Wildcard branch
     if (key === "*") {
-      const values = Array.isArray(current)
-        ? current
-        : Object.values(current);
+      const values = Array.isArray(current) ? current : Object.values(current);
 
       const results = [];
 
       for (const item of values) {
-        const value = this._getRecursive(
-          item,
-          keys,
-          index + 1,
-          visited
-        );
+        const value = this._getRecursive(item, keys, index + 1, visited);
 
         if (value !== undefined) {
-          if (
-            Array.isArray(value) &&
-            keys.slice(index + 1).includes("*")
-          ) {
+          if (Array.isArray(value) && keys.slice(index + 1).includes("*")) {
             results.push(...value);
           } else {
             results.push(value);
@@ -216,12 +200,7 @@ export class ObjectStore {
       return undefined;
     }
 
-    return this._getRecursive(
-      current[key],
-      keys,
-      index + 1,
-      visited
-    );
+    return this._getRecursive(current[key], keys, index + 1, visited);
   }
 
   /**
@@ -289,9 +268,7 @@ export class ObjectStore {
       target = [];
       this.set(path, target);
     } else if (!Array.isArray(target)) {
-      throw new TypeError(
-        `Target at path "${path}" is not an Array.`
-      );
+      throw new TypeError(`Target at path "${path}" is not an Array.`);
     }
 
     return target;
@@ -335,5 +312,37 @@ export class ObjectStore {
   splice(path, start, deleteCount, ...items) {
     const arr = this._ensureArray(path);
     return arr.splice(start, deleteCount, ...items);
+  }
+
+  static isNull(value) {
+    return value === null || value === undefined;
+  }
+
+  static isNullOrEmpty(value) {
+    if (value === null || value === undefined) {
+      return true;
+    }
+
+    if (typeof value === "string") {
+      return value.length === 0;
+    }
+
+    if (Array.isArray(value)) {
+      return value.length === 0;
+    }
+
+    if (typeof value === "object") {
+      return Object.keys(value).length === 0;
+    }
+
+    return false;
+  }
+
+  static isNullOrWhiteSpace(value) {
+    return (
+      value === null ||
+      value === undefined ||
+      (typeof value === "string" && value.trim().length === 0)
+    );
   }
 }
