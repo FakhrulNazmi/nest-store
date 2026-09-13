@@ -396,6 +396,113 @@ ObjectStore.isNullOrEmpty("");
 // true
 ```
 
+## Error Handling
+
+`nest-store` provides clear errors for invalid operations while keeping normal lookups simple.
+
+### `get()`
+
+Use `get()` when a missing path should return `undefined` instead of throwing an error.
+
+```js
+const store = new ObjectStore({
+  user: {
+    name: "John"
+  }
+});
+
+store.get("user.name");
+// "John"
+
+store.get("user.email");
+// undefined
+```
+
+### `getStrict()`
+
+Use `getStrict()` when the path must exist. It throws an `ObjectStoreError` when the path does not exist.
+
+```js
+store.getStrict("user.name");
+// "John"
+
+store.getStrict("user.email");
+// throws ObjectStoreError
+```
+
+Example error:
+
+```text
+ObjectStoreError: Path "user.email" does not exist.
+```
+
+### Invalid Paths
+
+Invalid paths throw an `ObjectStoreError`.
+
+```js
+store.set("user..name", "John");
+// throws ObjectStoreError
+```
+
+Example:
+
+```text
+ObjectStoreError: Invalid path "user..name". Path contains an empty segment.
+```
+
+### Forbidden Properties
+
+Prototype-related properties are blocked to help prevent prototype pollution.
+
+The following properties cannot be used as path segments:
+
+```text
+__proto__
+constructor
+prototype
+```
+
+Example:
+
+```js
+store.set("__proto__.isAdmin", true);
+// throws ObjectStoreError
+```
+
+### Array Index Validation
+
+Array indexes must be valid non-negative indexes within the supported limit.
+
+```js
+store.set("items[0].name", "Laptop");
+```
+
+Invalid or excessively large indexes throw an `ObjectStoreError`.
+
+### `ObjectStoreError`
+
+You can import `ObjectStoreError` when you need to handle library-specific errors.
+
+```js
+import {
+  ObjectStore,
+  ObjectStoreError
+} from "nest-store";
+
+const store = new ObjectStore();
+
+try {
+  store.getStrict("user.email");
+} catch (error) {
+  if (error instanceof ObjectStoreError) {
+    console.error(error.message);
+  }
+}
+```
+
+This allows applications to distinguish `nest-store` errors from other JavaScript errors.
+
 ## Prototype Pollution Protection
 
 `nest-store` blocks dangerous object property names:
