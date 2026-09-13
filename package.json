@@ -1,0 +1,30 @@
+{
+  "name": "nest-store",
+  "version": "1.0.0",
+  "description": "A safe and simple nested object and array store for JavaScript.",
+  "type": "module",
+  "main": "./src/index.js",
+  "module": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "example": "node examples/basic.js"
+  },
+  "keywords": [
+    "object",
+    "store",
+    "nested",
+    "path",
+    "utility",
+    "javascript"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "nazmi",
+  "license": "MIT"
+}
