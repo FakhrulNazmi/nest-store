@@ -10,8 +10,11 @@ function isObjectLike(value) {
   return value !== null && typeof value === "object";
 }
 
+// Canonical array index: "0", "1", "42" — but not "007" or "-1".
+// Non-canonical numeric strings are ordinary property names in JavaScript,
+// so treating them as indexes would make delete() remove the wrong element.
 function isArrayIndexKey(key) {
-  return /^\d+$/.test(key);
+  return /^(0|[1-9]\d*)$/.test(key);
 }
 
 function hasOwn(object, key) {
@@ -19,8 +22,8 @@ function hasOwn(object, key) {
 }
 
 export class ObjectStoreError extends Error {
-  constructor(message, path = null) {
-    super(message);
+  constructor(message, path = null, options = undefined) {
+    super(message, options);
 
     this.name = "ObjectStoreError";
     this.path = path;
@@ -42,6 +45,62 @@ function validateSegment(segment, path) {
   if (FORBIDDEN_KEYS.has(segment)) {
     throw new ObjectStoreError(
       `Forbidden property "${segment}".`,
+      path
+    );
+  }
+}
+
+// Rejects writes that would grow an array past MAX_SAFE_ARRAY_INDEX.
+// Indexes inside the array's current length are allowed, so arrays that
+// were already large when passed to the store stay writable.
+function assertIndexInRange(array, key, path) {
+  if (!isArrayIndexKey(key)) {
+    return;
+  }
+
+  const index = Number(key);
+
+  if (index > MAX_SAFE_ARRAY_INDEX && index >= array.length) {
+    throw new ObjectStoreError(
+      `Array index "${key}" exceeds the maximum allowed index.`,
+      path
+    );
+  }
+}
+
+function assertValidArrayLength(value, path) {
+  if (
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > MAX_SAFE_ARRAY_INDEX + 1
+  ) {
+    throw new ObjectStoreError(
+      `Invalid array length "${String(value)}". Length must be an integer between 0 and ${MAX_SAFE_ARRAY_INDEX + 1}.`,
+      path
+    );
+  }
+}
+
+// Validates a write of `value` to `container[key]`.
+function assertSafeWrite(container, key, value, path) {
+  if (!Array.isArray(container)) {
+    return;
+  }
+
+  if (key === "length") {
+    assertValidArrayLength(value, path);
+    return;
+  }
+
+  assertIndexInRange(container, key, path);
+}
+
+// Wildcards only make sense for reads. In write operations they would
+// either create a literal "*" key or silently modify a temporary array.
+function assertNoWildcard(parts, path, operation) {
+  if (parts.includes("*")) {
+    throw new ObjectStoreError(
+      `Wildcard "*" is not supported in ${operation}().`,
       path
     );
   }
@@ -103,58 +162,52 @@ function parsePath(path) {
 
     // Bracket notation
     if (path[i] === "[") {
-      const closeIndex = path.indexOf("]", i);
+      const quote = path[i + 1];
 
-      if (closeIndex === -1) {
-        throw new ObjectStoreError(
-          `Invalid path "${path}". Missing closing bracket.`,
-          path
-        );
-      }
+      let segment;
+      let closeIndex;
 
-      const content = path.slice(
-        i + 1,
-        closeIndex
-      );
+      if (quote === '"' || quote === "'") {
+        // ["name"] or ['name'] — the quoted key may contain "]" or ".".
+        const endQuote = path.indexOf(quote, i + 2);
 
-      if (content.length === 0) {
-        throw new ObjectStoreError(
-          `Invalid path "${path}". Empty bracket expression.`,
-          path
-        );
-      }
+        if (endQuote === -1 || path[endQuote + 1] !== "]") {
+          throw new ObjectStoreError(
+            `Invalid path "${path}". Unterminated quoted bracket expression.`,
+            path
+          );
+        }
 
-      let segment = content;
+        segment = path.slice(i + 2, endQuote);
+        closeIndex = endQuote + 1;
+      } else {
+        closeIndex = path.indexOf("]", i);
 
-      // ["name"]
-      // ['name']
-      if (
-        (content.startsWith('"') &&
-          content.endsWith('"')) ||
-        (content.startsWith("'") &&
-          content.endsWith("'"))
-      ) {
-        segment = content.slice(1, -1);
-      }
+        if (closeIndex === -1) {
+          throw new ObjectStoreError(
+            `Invalid path "${path}". Missing closing bracket.`,
+            path
+          );
+        }
 
-      // Only numeric indexes are allowed for unquoted brackets
-      if (
-        !content.startsWith('"') &&
-        !content.startsWith("'") &&
-        !/^\d+$/.test(content)
-      ) {
-        throw new ObjectStoreError(
-          `Invalid path "${path}". Invalid array index "${content}".`,
-          path
-        );
-      }
+        segment = path.slice(i + 1, closeIndex);
 
-      validateSegment(segment, path);
+        if (segment.length === 0) {
+          throw new ObjectStoreError(
+            `Invalid path "${path}". Empty bracket expression.`,
+            path
+          );
+        }
 
-      if (isArrayIndexKey(segment)) {
-        const index = Number(segment);
+        // Only canonical numeric indexes are allowed for unquoted brackets
+        if (!isArrayIndexKey(segment)) {
+          throw new ObjectStoreError(
+            `Invalid path "${path}". Invalid array index "${segment}".`,
+            path
+          );
+        }
 
-        if (index > MAX_SAFE_ARRAY_INDEX) {
+        if (Number(segment) > MAX_SAFE_ARRAY_INDEX) {
           throw new ObjectStoreError(
             `Array index "${segment}" exceeds the maximum allowed index.`,
             path
@@ -162,9 +215,24 @@ function parsePath(path) {
         }
       }
 
+      validateSegment(segment, path);
+
       parts.push(segment);
 
       i = closeIndex + 1;
+
+      // A bracket must be followed by ".", "[" or the end of the path.
+      if (
+        i < path.length &&
+        path[i] !== "." &&
+        path[i] !== "["
+      ) {
+        throw new ObjectStoreError(
+          `Invalid path "${path}". Unexpected character "${path[i]}" after "]".`,
+          path
+        );
+      }
+
       expectingSegment = false;
 
       continue;
@@ -246,6 +314,8 @@ export class ObjectStore {
   set(path, value) {
     const parts = parsePath(path);
 
+    assertNoWildcard(parts, path, "set");
+
     let current = this.data;
 
     for (let i = 0; i < parts.length - 1; i++) {
@@ -259,13 +329,25 @@ export class ObjectStore {
         );
       }
 
+      // Intermediate segments must respect the index limit too,
+      // otherwise "a.4000000000.b" creates a huge sparse array.
+      if (Array.isArray(current)) {
+        assertIndexInRange(current, key, path);
+      }
+
       if (
         !hasOwn(current, key) ||
         current[key] === null
       ) {
-        current[key] = isArrayIndexKey(nextKey)
-          ? []
-          : {};
+        const container = isArrayIndexKey(nextKey) ? [] : {};
+
+        // Validate before attaching, so a rejected path leaves no
+        // half-created containers behind.
+        if (Array.isArray(container)) {
+          assertIndexInRange(container, nextKey, path);
+        }
+
+        current[key] = container;
       } else if (!isObjectLike(current[key])) {
         throw new ObjectStoreError(
           `Cannot set "${path}". "${parts
@@ -280,19 +362,7 @@ export class ObjectStore {
 
     const finalKey = parts[parts.length - 1];
 
-    if (
-      Array.isArray(current) &&
-      isArrayIndexKey(finalKey)
-    ) {
-      const index = Number(finalKey);
-
-      if (index > MAX_SAFE_ARRAY_INDEX) {
-        throw new ObjectStoreError(
-          `Array index "${finalKey}" exceeds the maximum allowed index.`,
-          path
-        );
-      }
-    }
+    assertSafeWrite(current, finalKey, value, path);
 
     current[finalKey] = value;
 
@@ -490,6 +560,8 @@ export class ObjectStore {
   replace(path, value) {
     const parts = parsePath(path);
 
+    assertNoWildcard(parts, path, "replace");
+
     if (parts.length === 0) {
       return false;
     }
@@ -518,6 +590,8 @@ export class ObjectStore {
     if (!hasOwn(parent, key)) {
       return false;
     }
+
+    assertSafeWrite(parent, key, value, path);
 
     parent[key] = value;
 
@@ -531,6 +605,8 @@ export class ObjectStore {
   delete(path) {
     const parts = parsePath(path);
 
+    assertNoWildcard(parts, path, "delete");
+
     if (parts.length === 0) {
       return false;
     }
@@ -558,6 +634,13 @@ export class ObjectStore {
 
     if (!hasOwn(parent, key)) {
       return false;
+    }
+
+    if (Array.isArray(parent) && key === "length") {
+      throw new ObjectStoreError(
+        `Cannot delete "${path}". Array length cannot be deleted.`,
+        path
+      );
     }
 
     if (
@@ -679,7 +762,15 @@ export class ObjectStore {
   // -----------------------------
 
   clone() {
-    return structuredClone(this.data);
+    try {
+      return structuredClone(this.data);
+    } catch (error) {
+      throw new ObjectStoreError(
+        `Cannot clone store data: ${error.message}`,
+        null,
+        { cause: error }
+      );
+    }
   }
 
   // -----------------------------
@@ -687,7 +778,7 @@ export class ObjectStore {
   // -----------------------------
 
   push(path, ...values) {
-    const array = this._ensureArray(path);
+    const array = this._ensureArray(path, "push");
 
     array.push(...values);
 
@@ -695,19 +786,19 @@ export class ObjectStore {
   }
 
   pop(path) {
-    const array = this._ensureArray(path);
+    const array = this._ensureArray(path, "pop");
 
     return array.pop();
   }
 
   shift(path) {
-    const array = this._ensureArray(path);
+    const array = this._ensureArray(path, "shift");
 
     return array.shift();
   }
 
   unshift(path, ...values) {
-    const array = this._ensureArray(path);
+    const array = this._ensureArray(path, "unshift");
 
     return array.unshift(...values);
   }
@@ -718,7 +809,7 @@ export class ObjectStore {
     deleteCount,
     ...items
   ) {
-    const array = this._ensureArray(path);
+    const array = this._ensureArray(path, "splice");
 
     return array.splice(
       start,
@@ -731,8 +822,14 @@ export class ObjectStore {
   // Internal array validation
   // -----------------------------
 
-  _ensureArray(path) {
-    const value = this.get(path);
+  _ensureArray(path, operation) {
+    const parts = parsePath(path);
+
+    // A wildcard get() returns a new results array, so mutating it
+    // would silently do nothing to the stored data.
+    assertNoWildcard(parts, path, operation);
+
+    const value = this._getRecursive(this.data, parts, new Set());
 
     if (!Array.isArray(value)) {
       throw new ObjectStoreError(
