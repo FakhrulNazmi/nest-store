@@ -107,6 +107,20 @@ You can also use array paths:
 store.set(["items", 0, "name"], "Laptop");
 ```
 
+### Quoted Keys
+
+Use quoted brackets for keys that contain `.`, `[` or `]`:
+
+```js
+store.set('config["api.url"]', "https://example.com");
+store.set("config['a]b']", 1);
+
+console.log(store.get('config["api.url"]'));
+// "https://example.com"
+```
+
+A closing bracket must be followed by `.`, `[`, or the end of the path. Paths such as `a[0]b` or `a["b']` (mismatched quotes) throw an `ObjectStoreError`.
+
 ## Wildcard Paths
 
 Use `*` to retrieve values from multiple objects or array elements.
@@ -129,6 +143,21 @@ Result:
   "John",
   "Jane"
 ]
+```
+
+Wildcards are **read-only**. They work with `get()` and `getStrict()`, but `set()`, `replace()`, `delete()`, `push()`, `pop()`, `shift()`, `unshift()` and `splice()` throw an `ObjectStoreError` when the path contains `*`:
+
+```js
+store.set("users.*.active", true);
+// throws ObjectStoreError: Wildcard "*" is not supported in set().
+```
+
+To update every item, loop over them:
+
+```js
+store.get("users").forEach((_, i) => {
+  store.set(["users", i, "active"], true);
+});
 ```
 
 ## Delete
@@ -480,6 +509,31 @@ store.set("items[0].name", "Laptop");
 
 Invalid or excessively large indexes throw an `ObjectStoreError`.
 
+The rules:
+
+* Array indexes must be canonical numbers: `0`, `1`, `42`. Leading zeros (`[007]`) and negative numbers (`[-1]`) are rejected in bracket notation. In dot notation, `items.007` is treated as an ordinary property name, not index 7.
+* Arrays cannot grow past index `100000`. This applies to every segment of the path, so `a.4000000000.b` is rejected as well. It prevents huge sparse arrays that would make later wildcard reads hang.
+* Large numeric keys on plain **objects** are allowed, e.g. `users.4000000000` where `users` is an object.
+* Arrays that are already larger than the limit when passed to the store can still be written below their current length.
+* An array's `length` can be set to an integer from `0` to `100001` (for example to truncate it). Other values throw. Deleting `length` throws.
+
+```js
+store.set("items.length", 0);
+// OK, empties the array
+
+store.set("items.length", 4294967295);
+// throws ObjectStoreError: Invalid array length
+
+store.set("items[999999]", "x");
+// throws ObjectStoreError: Array index "999999" exceeds the maximum allowed index.
+```
+
+When a path is rejected, nothing is written, not even the intermediate objects or arrays.
+
+### `clone()`
+
+`clone()` returns a deep copy using `structuredClone()`. If the data contains values that cannot be cloned, such as functions, it throws an `ObjectStoreError` with the original error as `error.cause`.
+
 ### `ObjectStoreError`
 
 You can import `ObjectStoreError` when you need to handle library-specific errors.
@@ -520,6 +574,26 @@ store.set("__proto__.polluted", true);
 ```
 
 will throw an error instead of modifying the object prototype.
+
+## Upgrading to 1.2.0
+
+1.2.0 fixes a denial-of-service issue and tightens path parsing. Some paths that used to be accepted now throw an `ObjectStoreError`:
+
+| Before 1.2.0 | 1.2.0 |
+|---|---|
+| `set("a.4000000000.x", 1)` created a sparse array with 4 billion slots | Throws (index limit now applies to every segment) |
+| `set("a.length", 4294967295)` grew the array | Throws (invalid length) |
+| `set("a.length", -1)` threw a `RangeError` | Throws `ObjectStoreError` |
+| `delete("a.length")` threw a `TypeError` | Throws `ObjectStoreError` |
+| `delete("a.007")` removed `a[7]` | Removes the `"007"` property only |
+| `set("u.*.x", 1)` wrote a literal `"*"` key | Throws (wildcards are read-only) |
+| `delete("u.*.0")` / `push("u.*", x)` returned success but changed nothing | Throws |
+| `a[0]b` was read as `a.0.b` | Throws |
+| `a["b']` created the key `"b'` | Throws |
+| `a[007]` was accepted | Throws |
+| `clone()` threw `DataCloneError` | Throws `ObjectStoreError` (original as `cause`) |
+
+New: quoted bracket keys can contain `.` and `]`, e.g. `config["a.b]c"]`.
 
 ## Example
 
