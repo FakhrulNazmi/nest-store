@@ -4,6 +4,7 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,5 +34,13 @@ jobs:
       - name: Run example
         run: npm run example
 
+      - name: Check OIDC token availability
+        run: |
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            echo "OIDC token is available to this job"
+          else
+            echo "::error::OIDC token is NOT available (id-token: write missing)"
+          fi
+
       - name: Publish package
-        run: npm publish
+        run: npm publish --loglevel verbose
